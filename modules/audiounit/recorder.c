@@ -22,6 +22,17 @@ struct ausrc_st {
 	ausrc_read_h *rh;
 	void *arg;
 	uint32_t sampsz;
+	AudioConverterRef conv;
+	void *buf;
+	double sampc_ratio;
+	uint32_t srate_hw;
+	uint32_t srate_app;
+};
+
+
+struct input_data {
+	void *buf;
+	uint32_t sampsz;
 };
 
 
@@ -37,12 +48,38 @@ static void ausrc_destructor(void *arg)
 	AudioUnitUninitialize(st->au);
 	AudioComponentInstanceDispose(st->au);
 
+	if (st->conv)
+		AudioConverterDispose(st->conv);
+
 	mem_deref(st->sess);
+	mem_deref(st->buf);
 
 	pthread_mutex_destroy(&st->mutex);
 }
 
 
+/* TODO: glitches when converting from 44100 -> 48000 */
+static OSStatus conv_input_proc(
+                 AudioConverterRef inAudioConverter,
+                 UInt32 *ioNumberDataPackets,
+                 AudioBufferList *ioData,
+                 AudioStreamPacketDescription **outDataPacketDescription,
+                 void *inUserData)
+{
+	struct input_data *data = inUserData;
+	const int channels = ioData->mBuffers[0].mNumberChannels;
+	const int sampc = *ioNumberDataPackets * channels;
+
+	ioData->mBuffers[0].mData = data->buf;
+	ioData->mBuffers[0].mDataByteSize = sampc * data->sampsz;
+
+	return noErr;
+}
+
+
+/*
+ * @param ioData Always nil
+ */
 static OSStatus input_callback(void *inRefCon,
 			       AudioUnitRenderActionFlags *ioActionFlags,
 			       const AudioTimeStamp *inTimeStamp,
@@ -51,11 +88,12 @@ static OSStatus input_callback(void *inRefCon,
 			       AudioBufferList *ioData)
 {
 	struct ausrc_st *st = inRefCon;
-	AudioBufferList abl;
+	AudioBufferList abl, abl_out;
 	OSStatus ret;
 	ausrc_read_h *rh;
 	void *arg;
-
+	const size_t sampc_in = inNumberFrames * st->ch;
+	const size_t sampc_out = inNumberFrames * st->ch * st->sampc_ratio;
 	(void)ioData;
 
 	pthread_mutex_lock(&st->mutex);
@@ -69,7 +107,12 @@ static OSStatus input_callback(void *inRefCon,
 	abl.mNumberBuffers = 1;
 	abl.mBuffers[0].mNumberChannels = st->ch;
 	abl.mBuffers[0].mData = NULL;
-	abl.mBuffers[0].mDataByteSize = inNumberFrames * st->sampsz;
+	abl.mBuffers[0].mDataByteSize = (uint32_t)(sampc_in * st->sampsz);
+
+	abl_out.mNumberBuffers = 1;
+	abl_out.mBuffers[0].mNumberChannels = st->ch;
+	abl_out.mBuffers[0].mData = st->buf;
+	abl_out.mBuffers[0].mDataByteSize = (uint32_t)(sampc_out * st->sampsz);
 
 	ret = AudioUnitRender(st->au,
 			      ioActionFlags,
@@ -78,12 +121,32 @@ static OSStatus input_callback(void *inRefCon,
 			      inNumberFrames,
 			      &abl);
 	if (ret) {
-		debug("audiounit: record: AudioUnitRender error (%d)\n", ret);
+		warning("audiounit: record: AudioUnitRender error (%d)\n",
+			ret);
 		return ret;
 	}
 
-	rh(abl.mBuffers[0].mData,
-	   abl.mBuffers[0].mDataByteSize/st->sampsz, arg);
+
+	UInt32 out_packet_size = (uint32_t)sampc_out;
+
+	struct input_data data;
+
+	data.buf    = abl.mBuffers[0].mData;
+	data.sampsz = st->sampsz;
+
+	ret = AudioConverterFillComplexBuffer(st->conv,
+					      conv_input_proc,
+					      &data,
+					      &out_packet_size,
+					      &abl_out,
+					      0);
+	if (ret) {
+		warning("audiounit: record:"
+			" AudioConverterFillComplexBuffer (%d)\n", ret);
+		return ret;
+	}
+
+	rh(st->buf, sampc_out, arg);
 
 	return 0;
 }
@@ -105,7 +168,7 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 			     struct ausrc_prm *prm, const char *device,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
-	AudioStreamBasicDescription fmt;
+	AudioStreamBasicDescription fmt, fmt_app;
 	AudioUnitElement inputBus = 1;
 	AURenderCallbackStruct cb;
 	struct ausrc_st *st;
@@ -143,6 +206,12 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (err)
 		goto out;
 
+	st->buf = mem_alloc(4096, NULL);
+	if (!st->buf) {
+		err = ENOMEM;
+		goto out;
+	}
+
 	err = audiosess_alloc(&st->sess, interrupt_handler, st);
 	if (err)
 		goto out;
@@ -150,6 +219,22 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	ret = AudioComponentInstanceNew(audiounit_comp, &st->au);
 	if (ret)
 		goto out;
+
+	ret = AudioUnitGetProperty(st->au,
+				   kAudioUnitProperty_SampleRate,
+				   kAudioUnitScope_Input,
+				   0,
+				   &hw_srate,
+				   &hw_size);
+	if (ret)
+		goto out;
+
+	debug("audiounit: record hardware sample rate is now at %f Hz\n",
+	      hw_srate);
+
+	st->srate_hw = hw_srate;
+	st->srate_app = prm->srate;
+	st->sampc_ratio = prm->srate / hw_srate;
 
 	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Input, inputBus,
@@ -186,7 +271,7 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	st->sampsz = (uint32_t)aufmt_sample_size(prm->fmt);
 
-	fmt.mSampleRate       = prm->srate;
+	fmt.mSampleRate       = hw_srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
 #if TARGET_OS_IPHONE
 	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(prm->fmt)
@@ -223,21 +308,22 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (ret)
 		goto out;
 
+	fmt_app = fmt;
+	fmt_app.mSampleRate = prm->srate;
+
+	ret = AudioConverterNew(&fmt, &fmt_app, &st->conv);
+	if (ret) {
+		warning("audiounit: record: AudioConverter failed (%d)\n",
+			ret);
+		goto out;
+	}
+
+	info("audiounit: record: enable resampler %.1f -> %u Hz\n",
+	     hw_srate, prm->srate);
+
 	ret = AudioOutputUnitStart(st->au);
 	if (ret)
 		goto out;
-
-	ret = AudioUnitGetProperty(st->au,
-				   kAudioUnitProperty_SampleRate,
-				   kAudioUnitScope_Input,
-				   0,
-				   &hw_srate,
-				   &hw_size);
-	if (ret)
-		goto out;
-
-	debug("audiounit: record hardware sample rate is now at %f Hz\n",
-	      hw_srate);
 
  out:
 	if (ret) {
