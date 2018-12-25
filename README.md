@@ -75,7 +75,6 @@ Distributed under BSD license
   - L16
   - MPA
   - Opus
-  - Silk
 
 * Audio-drivers:
   - Advanced Linux Sound Architecture (ALSA) audio-driver
@@ -231,7 +230,7 @@ cairo         Cairo video source
 codec2        Codec2 low bit rate speech codec
 cons          UDP/TCP console UI driver
 contact       Contacts module
-coreaudio     Apple Coreaudio driver
+coreaudio     Apple macOS Coreaudio driver
 ctrl_tcp      TCP control interface using JSON payload
 debug_cmd     Debug commands
 directfb      DirectFB video display module
@@ -280,7 +279,6 @@ rst           Radio streamer using mpg123
 sdl           Simple DirectMedia Layer (SDL) video output driver
 sdl2          Simple DirectMedia Layer v2 (SDL2) video output driver
 selfview      Video selfview module
-silk          SILK audio codec
 snapshot      Save video-stream as PNG images
 sndfile       Audio dumper using libsndfile
 sndio         Audio driver for OpenBSD

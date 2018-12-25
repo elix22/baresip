@@ -19,9 +19,9 @@ struct ausrc_st {
 	AudioUnit au;
 	pthread_mutex_t mutex;
 	int ch;
+	uint32_t sampsz;
 	ausrc_read_h *rh;
 	void *arg;
-	uint32_t sampsz;
 	AudioConverterRef conv;
 	void *buf;
 	double sampc_ratio;
@@ -169,7 +169,8 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
 	AudioStreamBasicDescription fmt, fmt_app;
-	AudioUnitElement inputBus = 1;
+	const AudioUnitElement inputBus = 1;
+	const AudioUnitElement outputBus = 0;
 	AURenderCallbackStruct cb;
 	struct ausrc_st *st;
 	UInt32 enable = 1;
@@ -201,6 +202,12 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	st->rh  = rh;
 	st->arg = arg;
 	st->ch  = prm->ch;
+
+	st->sampsz = (uint32_t)aufmt_sample_size(prm->fmt);
+	if (!st->sampsz) {
+		err = ENOTSUP;
+		goto out;
+	}
 
 	err = pthread_mutex_init(&st->mutex, NULL);
 	if (err)
@@ -245,7 +252,7 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 #if ! TARGET_OS_IPHONE
 	enable = 0;
 	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
-				   kAudioUnitScope_Output, 0,
+				   kAudioUnitScope_Output, outputBus,
 				   &enable, sizeof(enable));
 	if (ret)
 		goto out;
