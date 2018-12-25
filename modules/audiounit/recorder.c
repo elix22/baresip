@@ -163,6 +163,39 @@ static void interrupt_handler(bool interrupted, void *arg)
 }
 
 
+static int print_sample_rate(const struct ausrc_st *st)
+{
+	const AudioUnitElement inputBus = 1;
+	Float64 srate_in;
+	Float64 srate_out;
+	UInt32 size = sizeof(srate_in);
+	OSStatus ret;
+
+	ret = AudioUnitGetProperty(st->au,
+				   kAudioUnitProperty_SampleRate,
+				   kAudioUnitScope_Input,
+				   inputBus,
+				   &srate_in,
+				   &size);
+	if (ret)
+		return ENODEV;
+
+	ret = AudioUnitGetProperty(st->au,
+				   kAudioUnitProperty_SampleRate,
+				   kAudioUnitScope_Output,
+				   inputBus,
+				   &srate_out,
+				   &size);
+	if (ret)
+		return ENODEV;
+
+	info("audiounit: recording sample rates: input %.1f, output %.1f Hz\n",
+	     srate_in, srate_out);
+
+	return 0;
+}
+
+
 int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 			     struct media_ctx **ctx,
 			     struct ausrc_prm *prm, const char *device,
@@ -173,6 +206,7 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	const AudioUnitElement outputBus = 0;
 	AURenderCallbackStruct cb;
 	struct ausrc_st *st;
+	const UInt32 disable = 0;
 	UInt32 enable = 1;
 #if ! TARGET_OS_IPHONE
 	UInt32 ausize = sizeof(AudioDeviceID);
@@ -182,7 +216,8 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		kAudioObjectPropertyScopeGlobal,
 		kAudioObjectPropertyElementMaster };
 #endif
-	Float64 hw_srate = 0.0;
+	Float64 srate = 0.0;
+	Float64 hw_srate;
 	UInt32 hw_size = sizeof(hw_srate);
 	OSStatus ret = 0;
 	int err;
@@ -193,6 +228,8 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	if (!stp || !as || !prm)
 		return EINVAL;
+
+	srate = prm->srate;
 
 	st = mem_zalloc(sizeof(*st), ausrc_destructor);
 	if (!st)
@@ -243,6 +280,19 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	st->srate_app = prm->srate;
 	st->sampc_ratio = prm->srate / hw_srate;
 
+#if 1
+	ret = AudioUnitSetProperty(st->au,
+				   kAudioUnitProperty_SampleRate,
+				   kAudioUnitScope_Output,
+				   inputBus,
+				   &srate,
+				   sizeof(srate));
+	if (ret) {
+		warning("failed to set samplerate on scope OUTPUT\n");
+		goto out;
+	}
+#endif
+
 	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Input, inputBus,
 				   &enable, sizeof(enable));
@@ -250,10 +300,11 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		goto out;
 
 #if ! TARGET_OS_IPHONE
-	enable = 0;
+
+	/* disable playback */
 	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
-				   kAudioUnitScope_Output, outputBus,
-				   &enable, sizeof(enable));
+			   kAudioUnitScope_Output, outputBus,
+			   &disable, sizeof(disable));
 	if (ret)
 		goto out;
 
@@ -274,6 +325,7 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 			sizeof(inputDevice));
 	if (ret)
 		goto out;
+
 #endif
 
 	st->sampsz = (uint32_t)aufmt_sample_size(prm->fmt);
@@ -331,6 +383,8 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	ret = AudioOutputUnitStart(st->au);
 	if (ret)
 		goto out;
+
+	print_sample_rate(st);
 
  out:
 	if (ret) {

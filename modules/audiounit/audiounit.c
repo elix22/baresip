@@ -35,6 +35,75 @@ uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt)
 }
 
 
+AudioDeviceID audiounit_default_device(bool recording)
+{
+
+	AudioObjectPropertyAddress auAddress = {
+		recording
+		? kAudioHardwarePropertyDefaultInputDevice
+		: kAudioHardwarePropertyDefaultOutputDevice,
+		kAudioObjectPropertyScopeGlobal,
+		kAudioObjectPropertyElementMaster
+	};
+
+	AudioDeviceID device_id;
+	UInt32 ausize = sizeof(device_id);
+	OSStatus ret = 0;
+
+	ret = AudioObjectGetPropertyData(kAudioObjectSystemObject,
+			&auAddress,
+			0,
+			NULL,
+			&ausize,
+			&device_id);
+	if (ret)
+		return 0;
+
+	return device_id;
+}
+
+
+int audiounit_print_samplerates(AudioDeviceID device)
+{
+	AudioValueRange rangev[64];
+	uint32_t count, i;
+	uint32_t size;
+	OSStatus ret;
+
+	const AudioObjectPropertyAddress prop_addr = {
+		kAudioDevicePropertyAvailableNominalSampleRates,
+		kAudioObjectPropertyScopeGlobal,
+		kAudioObjectPropertyElementMaster
+	};
+
+	size = sizeof(rangev);
+
+	ret = AudioObjectGetPropertyData(device,
+					 &prop_addr,
+					 0,
+					 NULL,
+					 &size,
+					 rangev);
+	if (ret)
+		return ENODEV;
+
+
+	count = size / sizeof(rangev[0]);
+
+	re_printf("Available %d Sample Rate\n", count);
+
+	for (i=0; i<count; i++) {
+
+		re_printf("Available Sample Rate value : %.1f - %.1f\n",
+			  rangev[i].mMinimum, rangev[i].mMaximum);
+	}
+
+	re_printf("\n");
+
+	return 0;
+}
+
+
 #if TARGET_OS_IPHONE
 static void interruptionListener(void *data, UInt32 inInterruptionState)
 {
@@ -93,6 +162,14 @@ static int module_init(void)
 			       "audiounit", audiounit_player_alloc);
 	err |= ausrc_register(&ausrc, baresip_ausrcl(),
 			      "audiounit", audiounit_recorder_alloc);
+
+	info("audiounit: recording device: %u\n",
+	     audiounit_default_device(true));
+	audiounit_print_samplerates(audiounit_default_device(true));
+
+	info("audiounit: playback device: %u\n",
+	     audiounit_default_device(false));
+	audiounit_print_samplerates(audiounit_default_device(false));
 
 	return err;
 }

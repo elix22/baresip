@@ -28,3 +28,5 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 
 uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt);
+AudioDeviceID audiounit_default_device(bool recording);
+int audiounit_print_samplerates(AudioDeviceID device);
